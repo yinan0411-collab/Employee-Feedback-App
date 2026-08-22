@@ -793,17 +793,49 @@ def render_profile(db: Database, employee_id: str) -> None:
     st.divider()
 
     # Feedback / Warning first, full width.
-    head, add = st.columns([8, 1], gap="small", vertical_alignment="center")
+    feedback_form_key = f"show_feedback_form_{employee_id}"
+    if feedback_form_key not in st.session_state:
+        st.session_state[feedback_form_key] = False
+
+    head, add = st.columns([10, 1], gap="small", vertical_alignment="center")
     head.subheader("⚠️ Feedback / Warning")
     with add:
-        with st.popover("＋", use_container_width=True):
+        button_label = "×" if st.session_state[feedback_form_key] else "＋"
+        if st.button(button_label, key=f"toggle_feedback_{employee_id}", use_container_width=True):
+            st.session_state[feedback_form_key] = not st.session_state[feedback_form_key]
+            st.rerun()
+
+    if st.session_state[feedback_form_key]:
+        with st.container(border=True):
+            st.markdown("#### Add Feedback / Warning")
             with st.form(f"add_feedback_{employee_id}", clear_on_submit=True):
-                fb_date = st.date_input("Date", value=date.today())
-                fb_type = st.selectbox("Type", FEEDBACK_TYPES)
-                fb_content = st.text_area("Feedback / Warning", placeholder="写下记录内容…", height=120)
+                top1, top2, top3 = st.columns([1.2, 1.6, 1.4], gap="medium")
+                with top1:
+                    fb_date = st.date_input("Date", value=date.today())
+                with top2:
+                    fb_type = st.selectbox("Type", FEEDBACK_TYPES)
+                with top3:
+                    fb_by = st.text_input("Recorded by (optional)")
+
+                fb_content = st.text_area(
+                    "Feedback / Warning",
+                    placeholder="写下记录内容…",
+                    height=180,
+                )
                 fb_note = st.text_input("Note / Follow-up (optional)")
-                fb_by = st.text_input("Recorded by (optional)")
-                submitted = st.form_submit_button("Save Feedback", type="primary", use_container_width=True)
+
+                save_col, cancel_col, spacer = st.columns([1.4, 1, 5], gap="small")
+                with save_col:
+                    submitted = st.form_submit_button(
+                        "Save Feedback", type="primary", use_container_width=True
+                    )
+                with cancel_col:
+                    cancel_feedback = st.form_submit_button("Cancel", use_container_width=True)
+
+                if cancel_feedback:
+                    st.session_state[feedback_form_key] = False
+                    st.rerun()
+
                 if submitted:
                     if not fb_content.strip():
                         st.error("Feedback 内容不能为空。")
@@ -816,6 +848,7 @@ def render_profile(db: Database, employee_id: str) -> None:
                             fb_note.strip() or None,
                             fb_by.strip() or None,
                         )
+                        st.session_state[feedback_form_key] = False
                         st.success("Feedback 已保存。")
                         st.rerun()
 
@@ -827,16 +860,47 @@ def render_profile(db: Database, employee_id: str) -> None:
     st.divider()
 
     # Recognition below Feedback / Warning, also full width.
-    head, add = st.columns([8, 1], gap="small", vertical_alignment="center")
+    recognition_form_key = f"show_recognition_form_{employee_id}"
+    if recognition_form_key not in st.session_state:
+        st.session_state[recognition_form_key] = False
+
+    head, add = st.columns([10, 1], gap="small", vertical_alignment="center")
     head.subheader("🏆 Recognition")
     with add:
-        with st.popover("＋", use_container_width=True):
+        button_label = "×" if st.session_state[recognition_form_key] else "＋"
+        if st.button(button_label, key=f"toggle_recognition_{employee_id}", use_container_width=True):
+            st.session_state[recognition_form_key] = not st.session_state[recognition_form_key]
+            st.rerun()
+
+    if st.session_state[recognition_form_key]:
+        with st.container(border=True):
+            st.markdown("#### Add Recognition")
             with st.form(f"add_recognition_{employee_id}", clear_on_submit=True):
-                rec_date = st.date_input("Date", value=date.today())
-                rec_content = st.text_area("Recognition", placeholder="写下表扬内容…", height=120)
+                top1, top2 = st.columns([1.2, 2.8], gap="medium")
+                with top1:
+                    rec_date = st.date_input("Date", value=date.today())
+                with top2:
+                    rec_by = st.text_input("Recorded by (optional)")
+
+                rec_content = st.text_area(
+                    "Recognition",
+                    placeholder="写下表扬内容…",
+                    height=180,
+                )
                 rec_note = st.text_input("Note (optional)")
-                rec_by = st.text_input("Recorded by (optional)")
-                submitted = st.form_submit_button("Save Recognition", type="primary", use_container_width=True)
+
+                save_col, cancel_col, spacer = st.columns([1.4, 1, 5], gap="small")
+                with save_col:
+                    submitted = st.form_submit_button(
+                        "Save Recognition", type="primary", use_container_width=True
+                    )
+                with cancel_col:
+                    cancel_recognition = st.form_submit_button("Cancel", use_container_width=True)
+
+                if cancel_recognition:
+                    st.session_state[recognition_form_key] = False
+                    st.rerun()
+
                 if submitted:
                     if not rec_content.strip():
                         st.error("Recognition 内容不能为空。")
@@ -848,6 +912,7 @@ def render_profile(db: Database, employee_id: str) -> None:
                             rec_note.strip() or None,
                             rec_by.strip() or None,
                         )
+                        st.session_state[recognition_form_key] = False
                         st.success("Recognition 已保存。")
                         st.rerun()
 
