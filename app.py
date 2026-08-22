@@ -569,6 +569,10 @@ def inject_css() -> None:
             .record-meta {color: #6b7280; font-size: .83rem; margin-bottom: .35rem;}
             div[data-testid="stMetric"] {border: 1px solid rgba(128,128,128,.22); padding: 12px 14px; border-radius: 12px;}
             div[data-testid="stExpander"] {border-radius: 12px;}
+            .employee-cell {padding: .30rem .15rem; white-space: normal; overflow-wrap: anywhere;}
+            .employee-number {padding: .30rem .15rem; text-align: right; font-variant-numeric: tabular-nums;}
+            .employee-row-divider {height: 1px; background: rgba(128,128,128,.28); margin: .18rem 0 .28rem 0;}
+            .employee-row-divider.subtle {background: rgba(128,128,128,.16); margin: .12rem 0 .16rem 0;}
         </style>
         """,
         unsafe_allow_html=True,
@@ -620,42 +624,44 @@ def open_profile(employee_id: str) -> None:
 
 
 def render_employee_table(group_df: pd.DataFrame, key_suffix: str) -> None:
+    """Render a fixed-width employee list without horizontal scrolling."""
     if group_df.empty:
         return
 
-    display = group_df[["name", "employee_id", "feedback_count", "recognition_count"]].copy()
-    display.columns = ["Employee", "User ID", "Feedback", "Recognition"]
-    display["Employee"] = display["Employee"].fillna(display["User ID"])
+    # Streamlit's dataframe can introduce a horizontal scrollbar when column
+    # minimum widths exceed the viewport. A row-based layout keeps all four
+    # columns inside the current screen width while preserving clickable names.
+    with st.container(border=True):
+        header = st.columns([4.2, 2.2, 1.2, 1.4], gap="small", vertical_alignment="center")
+        header[0].markdown("**Employee**")
+        header[1].markdown("**User ID**")
+        header[2].markdown("**Feedback**")
+        header[3].markdown("**Recognition**")
+        st.markdown("<div class='employee-row-divider'></div>", unsafe_allow_html=True)
 
-    click_key = f"employee_click_{key_suffix}"
-    st.dataframe(
-        display,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Employee": st.column_config.ButtonColumn(
-                "Employee",
+        for row_idx, row in group_df.reset_index(drop=True).iterrows():
+            employee_id = str(row.get("employee_id") or "")
+            employee_name = clean_value(row.get("name")) or employee_id
+            feedback_count = int(row.get("feedback_count") or 0)
+            recognition_count = int(row.get("recognition_count") or 0)
+
+            cols = st.columns([4.2, 2.2, 1.2, 1.4], gap="small", vertical_alignment="center")
+            if cols[0].button(
+                employee_name,
+                key=f"employee_btn_{key_suffix}_{row_idx}",
                 type="tertiary",
-                key=click_key,
+                use_container_width=True,
                 help="点击员工姓名进入个人记录",
-                width="large",
-            ),
-            "User ID": st.column_config.TextColumn("User ID", width="medium"),
-            "Feedback": st.column_config.NumberColumn("Feedback", format="%d", width="small"),
-            "Recognition": st.column_config.NumberColumn("Recognition", format="%d", width="small"),
-        },
-        key=f"employee_table_{key_suffix}",
-    )
+            ):
+                open_profile(employee_id)
+                st.rerun()
 
-    click = st.session_state.get(click_key)
-    if click:
-        try:
-            row_idx = int(click["row"])
-            employee_id = str(group_df.iloc[row_idx]["employee_id"])
-            open_profile(employee_id)
-            st.rerun()
-        except Exception:
-            pass
+            cols[1].markdown(f"<div class='employee-cell'>{escape_html(employee_id)}</div>", unsafe_allow_html=True)
+            cols[2].markdown(f"<div class='employee-number'>{feedback_count}</div>", unsafe_allow_html=True)
+            cols[3].markdown(f"<div class='employee-number'>{recognition_count}</div>", unsafe_allow_html=True)
+
+            if row_idx < len(group_df) - 1:
+                st.markdown("<div class='employee-row-divider subtle'></div>", unsafe_allow_html=True)
 
 
 def render_record_card(record: Dict[str, Any], kind: str) -> None:
@@ -785,69 +791,70 @@ def render_profile(db: Database, employee_id: str) -> None:
         st.dataframe(info_df, use_container_width=True, hide_index=True)
 
     st.divider()
-    left, right = st.columns(2, gap="large")
 
-    with left:
-        head, add = st.columns([4, 1])
-        head.subheader("🏆 Recognition")
-        with add:
-            with st.popover("＋", use_container_width=True):
-                with st.form(f"add_recognition_{employee_id}", clear_on_submit=True):
-                    rec_date = st.date_input("Date", value=date.today())
-                    rec_content = st.text_area("Recognition", placeholder="写下表扬内容…", height=120)
-                    rec_note = st.text_input("Note (optional)")
-                    rec_by = st.text_input("Recorded by (optional)")
-                    submitted = st.form_submit_button("Save Recognition", type="primary", use_container_width=True)
-                    if submitted:
-                        if not rec_content.strip():
-                            st.error("Recognition 内容不能为空。")
-                        else:
-                            db.add_recognition(
-                                employee_id,
-                                rec_date.isoformat(),
-                                rec_content.strip(),
-                                rec_note.strip() or None,
-                                rec_by.strip() or None,
-                            )
-                            st.success("Recognition 已保存。")
-                            st.rerun()
+    # Feedback / Warning first, full width.
+    head, add = st.columns([8, 1], gap="small", vertical_alignment="center")
+    head.subheader("⚠️ Feedback / Warning")
+    with add:
+        with st.popover("＋", use_container_width=True):
+            with st.form(f"add_feedback_{employee_id}", clear_on_submit=True):
+                fb_date = st.date_input("Date", value=date.today())
+                fb_type = st.selectbox("Type", FEEDBACK_TYPES)
+                fb_content = st.text_area("Feedback / Warning", placeholder="写下记录内容…", height=120)
+                fb_note = st.text_input("Note / Follow-up (optional)")
+                fb_by = st.text_input("Recorded by (optional)")
+                submitted = st.form_submit_button("Save Feedback", type="primary", use_container_width=True)
+                if submitted:
+                    if not fb_content.strip():
+                        st.error("Feedback 内容不能为空。")
+                    else:
+                        db.add_feedback(
+                            employee_id,
+                            fb_date.isoformat(),
+                            fb_type,
+                            fb_content.strip(),
+                            fb_note.strip() or None,
+                            fb_by.strip() or None,
+                        )
+                        st.success("Feedback 已保存。")
+                        st.rerun()
 
-        if not recognition:
-            st.caption("No recognition records yet.")
-        for rec in recognition:
-            render_record_card(rec, "recognition")
+    if not feedback:
+        st.caption("No feedback records yet.")
+    for rec in feedback:
+        render_record_card(rec, "feedback")
 
-    with right:
-        head, add = st.columns([4, 1])
-        head.subheader("⚠️ Feedback / Warning")
-        with add:
-            with st.popover("＋", use_container_width=True):
-                with st.form(f"add_feedback_{employee_id}", clear_on_submit=True):
-                    fb_date = st.date_input("Date", value=date.today())
-                    fb_type = st.selectbox("Type", FEEDBACK_TYPES)
-                    fb_content = st.text_area("Feedback / Warning", placeholder="写下记录内容…", height=120)
-                    fb_note = st.text_input("Note / Follow-up (optional)")
-                    fb_by = st.text_input("Recorded by (optional)")
-                    submitted = st.form_submit_button("Save Feedback", type="primary", use_container_width=True)
-                    if submitted:
-                        if not fb_content.strip():
-                            st.error("Feedback 内容不能为空。")
-                        else:
-                            db.add_feedback(
-                                employee_id,
-                                fb_date.isoformat(),
-                                fb_type,
-                                fb_content.strip(),
-                                fb_note.strip() or None,
-                                fb_by.strip() or None,
-                            )
-                            st.success("Feedback 已保存。")
-                            st.rerun()
+    st.divider()
 
-        if not feedback:
-            st.caption("No feedback records yet.")
-        for rec in feedback:
-            render_record_card(rec, "feedback")
+    # Recognition below Feedback / Warning, also full width.
+    head, add = st.columns([8, 1], gap="small", vertical_alignment="center")
+    head.subheader("🏆 Recognition")
+    with add:
+        with st.popover("＋", use_container_width=True):
+            with st.form(f"add_recognition_{employee_id}", clear_on_submit=True):
+                rec_date = st.date_input("Date", value=date.today())
+                rec_content = st.text_area("Recognition", placeholder="写下表扬内容…", height=120)
+                rec_note = st.text_input("Note (optional)")
+                rec_by = st.text_input("Recorded by (optional)")
+                submitted = st.form_submit_button("Save Recognition", type="primary", use_container_width=True)
+                if submitted:
+                    if not rec_content.strip():
+                        st.error("Recognition 内容不能为空。")
+                    else:
+                        db.add_recognition(
+                            employee_id,
+                            rec_date.isoformat(),
+                            rec_content.strip(),
+                            rec_note.strip() or None,
+                            rec_by.strip() or None,
+                        )
+                        st.success("Recognition 已保存。")
+                        st.rerun()
+
+    if not recognition:
+        st.caption("No recognition records yet.")
+    for rec in recognition:
+        render_record_card(rec, "recognition")
 
 
 def render_master(db: Database) -> None:
