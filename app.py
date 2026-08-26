@@ -560,8 +560,10 @@ class Database:
             conn.commit()
 
 
-@st.cache_resource
 def get_db() -> Database:
+    # Recreate the lightweight DB client on each Streamlit rerun.
+    # This avoids stale cached Database instances after app code upgrades
+    # (for example, an older cached object missing newly added delete methods).
     return Database()
 
 
@@ -874,7 +876,7 @@ def render_profile(db: Database, employee_id: str) -> None:
                 with top2:
                     fb_type = st.selectbox("Type", FEEDBACK_TYPES)
                 with top3:
-                    fb_by = st.text_input("Recorded by (optional)")
+                    fb_by = st.text_input("Recorded by *", placeholder="请输入记录人姓名")
 
                 fb_content = st.text_area(
                     "Feedback / Warning",
@@ -896,7 +898,9 @@ def render_profile(db: Database, employee_id: str) -> None:
                     st.rerun()
 
                 if submitted:
-                    if not fb_content.strip():
+                    if not fb_by.strip():
+                        st.error("请填写记录人姓名（Recorded by）。")
+                    elif not fb_content.strip():
                         st.error("Feedback 内容不能为空。")
                     else:
                         db.add_feedback(
@@ -905,7 +909,7 @@ def render_profile(db: Database, employee_id: str) -> None:
                             fb_type,
                             fb_content.strip(),
                             fb_note.strip() or None,
-                            fb_by.strip() or None,
+                            fb_by.strip(),
                         )
                         st.session_state[feedback_form_key] = False
                         st.success("Feedback 已保存。")
@@ -939,7 +943,7 @@ def render_profile(db: Database, employee_id: str) -> None:
                 with top1:
                     rec_date = st.date_input("Date", value=date.today())
                 with top2:
-                    rec_by = st.text_input("Recorded by (optional)")
+                    rec_by = st.text_input("Recorded by *", placeholder="请输入记录人姓名")
 
                 rec_content = st.text_area(
                     "Recognition",
@@ -961,7 +965,9 @@ def render_profile(db: Database, employee_id: str) -> None:
                     st.rerun()
 
                 if submitted:
-                    if not rec_content.strip():
+                    if not rec_by.strip():
+                        st.error("请填写记录人姓名（Recorded by）。")
+                    elif not rec_content.strip():
                         st.error("Recognition 内容不能为空。")
                     else:
                         db.add_recognition(
@@ -969,7 +975,7 @@ def render_profile(db: Database, employee_id: str) -> None:
                             rec_date.isoformat(),
                             rec_content.strip(),
                             rec_note.strip() or None,
-                            rec_by.strip() or None,
+                            rec_by.strip(),
                         )
                         st.session_state[recognition_form_key] = False
                         st.success("Recognition 已保存。")
