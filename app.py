@@ -41,7 +41,7 @@ EMPLOYEE_COLUMNS = [
 ]
 
 FEEDBACK_TYPES = [
-    "Feedback",
+    "Meal Break Violation",
     "Verbal Warning",
     "Written Warning",
     "Final Warning",
@@ -372,35 +372,28 @@ class Database:
                 item["raw_data"] = {}
             return item
 
-    def upsert_employees(self, rows: List[Dict[str, Any]]) -> None:
+    def insert_new_employees(self, rows: List[Dict[str, Any]]) -> int:
+        """Insert only new employee IDs. Existing employee master data is never overwritten."""
         if not rows:
-            return
+            return 0
+
+        existing_ids = {str(r.get("employee_id")) for r in self.list_employees()}
+        new_rows = [r for r in rows if str(r.get("employee_id")) not in existing_ids]
+        if not new_rows:
+            return 0
+
         if self.mode == "supabase":
             assert self.supabase is not None
-            for batch in chunks(rows):
-                self.supabase.table("employees").upsert(batch, on_conflict="employee_id").execute()
-            return
+            for batch in chunks(new_rows):
+                self.supabase.table("employees").insert(batch).execute()
+            return len(new_rows)
 
         sql = """
-        INSERT INTO employees (
+        INSERT OR IGNORE INTO employees (
             employee_id, erp, name, attendance_group, employment_status,
             account_status, department, job, employment_type, vendor,
             hire_date, termination_date, raw_data, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(employee_id) DO UPDATE SET
-            erp=excluded.erp,
-            name=excluded.name,
-            attendance_group=excluded.attendance_group,
-            employment_status=excluded.employment_status,
-            account_status=excluded.account_status,
-            department=excluded.department,
-            job=excluded.job,
-            employment_type=excluded.employment_type,
-            vendor=excluded.vendor,
-            hire_date=excluded.hire_date,
-            termination_date=excluded.termination_date,
-            raw_data=excluded.raw_data,
-            updated_at=excluded.updated_at
         """
         values = [
             (
@@ -419,11 +412,16 @@ class Database:
                 json.dumps(r.get("raw_data") or {}, ensure_ascii=False),
                 r.get("updated_at") or now_iso(),
             )
-            for r in rows
+            for r in new_rows
         ]
         with self._connect() as conn:
+            before = conn.total_changes
             conn.executemany(sql, values)
             conn.commit()
+            return conn.total_changes - before
+
+    def employee_exists(self, employee_id: str) -> bool:
+        return self.get_employee(employee_id) is not None
 
     def list_feedback(self, employee_id: Optional[str] = None) -> List[Dict[str, Any]]:
         if self.mode == "supabase":
@@ -527,6 +525,38 @@ class Database:
                 """,
                 tuple(row[k] for k in ["id", "employee_id", "record_date", "content", "note", "created_by", "created_at"]),
             )
+            conn.commit()
+
+    def delete_feedback(self, record_id: str) -> None:
+        if self.mode == "supabase":
+            assert self.supabase is not None
+            self.supabase.table("feedback_records").delete().eq("id", record_id).execute()
+            return
+        with self._connect() as conn:
+            conn.execute("DELETE FROM feedback_records WHERE id=?", (record_id,))
+            conn.commit()
+
+    def delete_recognition(self, record_id: str) -> None:
+        if self.mode == "supabase":
+            assert self.supabase is not None
+            self.supabase.table("recognition_records").delete().eq("id", record_id).execute()
+            return
+        with self._connect() as conn:
+            conn.execute("DELETE FROM recognition_records WHERE id=?", (record_id,))
+            conn.commit()
+
+    def delete_employee(self, employee_id: str) -> None:
+        """Delete one employee and all linked Feedback/Warning/Recognition history."""
+        if self.mode == "supabase":
+            assert self.supabase is not None
+            self.supabase.table("feedback_records").delete().eq("employee_id", employee_id).execute()
+            self.supabase.table("recognition_records").delete().eq("employee_id", employee_id).execute()
+            self.supabase.table("employees").delete().eq("employee_id", employee_id).execute()
+            return
+        with self._connect() as conn:
+            conn.execute("DELETE FROM feedback_records WHERE employee_id=?", (employee_id,))
+            conn.execute("DELETE FROM recognition_records WHERE employee_id=?", (employee_id,))
+            conn.execute("DELETE FROM employees WHERE employee_id=?", (employee_id,))
             conn.commit()
 
 
@@ -664,21 +694,50 @@ def render_employee_table(group_df: pd.DataFrame, key_suffix: str) -> None:
                 st.markdown("<div class='employee-row-divider subtle'></div>", unsafe_allow_html=True)
 
 
-def render_record_card(record: Dict[str, Any], kind: str) -> None:
+def render_record_card(db: Database, record: Dict[str, Any], kind: str) -> None:
+    record_id = str(record.get("id") or "")
+    delete_state_key = f"confirm_delete_{kind}_{record_id}"
+    if delete_state_key not in st.session_state:
+        st.session_state[delete_state_key] = False
+
     with st.container(border=True):
+        title_col, delete_col = st.columns([12, 1], gap="small", vertical_alignment="center")
         if kind == "feedback":
-            title = escape_html(record.get("feedback_type") or "Feedback")
+            title = escape_html(record.get("feedback_type") or "Feedback / Warning")
         else:
             title = "Recognition"
+
+        with title_col:
+            st.markdown(f"**{title}**")
+        with delete_col:
+            if st.button("🗑️", key=f"delete_{kind}_{record_id}", help="Delete this record", use_container_width=True):
+                st.session_state[delete_state_key] = True
+                st.rerun()
+
         meta = format_date(record.get("record_date"))
         by = clean_value(record.get("created_by"))
         if by:
             meta += f" · Recorded by {escape_html(by)}"
-        st.markdown(f"**{title}**")
         st.markdown(f"<div class='record-meta'>{meta}</div>", unsafe_allow_html=True)
         st.write(record.get("content") or "")
         if clean_value(record.get("note")):
             st.caption(f"Note: {record.get('note')}")
+
+        if st.session_state[delete_state_key]:
+            st.warning("确认删除这条记录？删除后无法恢复。")
+            yes_col, no_col, _ = st.columns([1.2, 1, 6])
+            with yes_col:
+                if st.button("Confirm Delete", key=f"confirm_{kind}_{record_id}", type="primary", use_container_width=True):
+                    if kind == "feedback":
+                        db.delete_feedback(record_id)
+                    else:
+                        db.delete_recognition(record_id)
+                    st.session_state.pop(delete_state_key, None)
+                    st.rerun()
+            with no_col:
+                if st.button("Cancel", key=f"cancel_delete_{kind}_{record_id}", use_container_width=True):
+                    st.session_state[delete_state_key] = False
+                    st.rerun()
 
 
 # -----------------------------
@@ -717,7 +776,7 @@ def render_home(db: Database) -> None:
 
     total_col, fb_col, rec_col = st.columns(3)
     total_col.metric("Employees", len(filtered))
-    fb_col.metric("Feedback", int(filtered["feedback_count"].sum()) if not filtered.empty else 0)
+    fb_col.metric("Feedback / Warning", int(filtered["feedback_count"].sum()) if not filtered.empty else 0)
     rec_col.metric("Recognition", int(filtered["recognition_count"].sum()) if not filtered.empty else 0)
 
     if filtered.empty:
@@ -769,7 +828,7 @@ def render_profile(db: Database, employee_id: str) -> None:
     warning_count = sum("warning" in str(r.get("feedback_type", "")).lower() for r in feedback)
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Feedback", len(feedback))
+    m1.metric("Feedback / Warning", len(feedback))
     m2.metric("Recognition", len(recognition))
     m3.metric("Warnings", warning_count)
 
@@ -855,7 +914,7 @@ def render_profile(db: Database, employee_id: str) -> None:
     if not feedback:
         st.caption("No feedback records yet.")
     for rec in feedback:
-        render_record_card(rec, "feedback")
+        render_record_card(db, rec, "feedback")
 
     st.divider()
 
@@ -919,12 +978,12 @@ def render_profile(db: Database, employee_id: str) -> None:
     if not recognition:
         st.caption("No recognition records yet.")
     for rec in recognition:
-        render_record_card(rec, "recognition")
+        render_record_card(db, rec, "recognition")
 
 
 def render_master(db: Database) -> None:
     st.title("Employee Master")
-    st.caption("上传员工底表后按“用户编码”更新/新增。未出现在新文件里的旧员工不会被删除。成绩/Score 字段会自动忽略。")
+    st.caption("上传员工底表时，只新增数据库中不存在的用户编码。已有员工资料不会被替换或覆盖；历史 Feedback / Warning / Recognition 始终保留。成绩/Score 字段自动忽略。")
 
     current = dataframe_from(db.list_employees(), EMPLOYEE_COLUMNS)
     c1, c2 = st.columns(2)
@@ -934,7 +993,7 @@ def render_master(db: Database) -> None:
     else:
         c2.metric("Active", 0)
 
-    st.subheader("Upload / Update Employee Master")
+    st.subheader("Upload / Add New Employees")
     uploaded = st.file_uploader("Excel or CSV", type=["xlsx", "xls", "csv"])
     if uploaded is not None:
         raw_bytes = uploaded.getvalue()
@@ -957,16 +1016,21 @@ def render_master(db: Database) -> None:
         if missing:
             st.error("缺少必要字段：" + "、".join(missing))
         else:
-            existing = {r["employee_id"]: r for r in db.list_employees()}
-            new_count = sum(r["employee_id"] not in existing for r in rows)
-            update_count = len(rows) - new_count
+            existing = {str(r["employee_id"]): r for r in db.list_employees()}
+            new_rows = [r for r in rows if str(r["employee_id"]) not in existing]
+            skipped_count = len(rows) - len(new_rows)
 
-            st.success(f"识别到 {len(rows)} 名员工：新增 {new_count}，更新/覆盖 {update_count}。")
-            preview = pd.DataFrame(rows)[["employee_id", "erp", "name", "attendance_group", "employment_status"]].head(30)
+            st.success(
+                f"识别到 {len(rows)} 名员工：可新增 {len(new_rows)}，已有 {skipped_count} 名将跳过，不会覆盖。"
+            )
+            if skipped_count:
+                st.info("已有员工将保持数据库中的原资料不变，所有历史 Feedback / Warning / Recognition 记录也不会受到影响。")
+            preview_source = new_rows if new_rows else rows
+            preview = pd.DataFrame(preview_source)[["employee_id", "erp", "name", "attendance_group", "employment_status"]].head(30)
             st.dataframe(preview, use_container_width=True, hide_index=True)
-            if st.button("Save to Database", type="primary", use_container_width=True):
-                db.upsert_employees(rows)
-                st.success(f"已保存 {len(rows)} 名员工。历史 Feedback / Recognition 不受影响。")
+            if st.button("Add New Employees to Database", type="primary", use_container_width=True):
+                inserted = db.insert_new_employees(new_rows)
+                st.success(f"已新增 {inserted} 名员工；已有员工 0 条被覆盖。历史记录完整保留。")
                 st.rerun()
 
     st.divider()
@@ -1003,27 +1067,68 @@ def render_master(db: Database) -> None:
                     "岗位": job.strip() or None,
                     "供应商": vendor.strip() or None,
                 }
-                db.upsert_employees(
-                    [
-                        {
-                            "employee_id": employee_id.strip(),
-                            "erp": erp.strip() or None,
-                            "name": name.strip(),
-                            "attendance_group": attendance_group.strip(),
-                            "employment_status": employment_status or None,
-                            "account_status": account_status or None,
-                            "department": department.strip() or None,
-                            "job": job.strip() or None,
-                            "employment_type": None,
-                            "vendor": vendor.strip() or None,
-                            "hire_date": None,
-                            "termination_date": None,
-                            "raw_data": raw,
-                            "updated_at": now_iso(),
-                        }
-                    ]
-                )
-                st.success("员工已保存。")
+                if db.employee_exists(employee_id.strip()):
+                    st.error("这个用户编码已经存在。为保护已有员工资料和历史记录，系统不会覆盖原员工。")
+                else:
+                    inserted = db.insert_new_employees(
+                        [
+                            {
+                                "employee_id": employee_id.strip(),
+                                "erp": erp.strip() or None,
+                                "name": name.strip(),
+                                "attendance_group": attendance_group.strip(),
+                                "employment_status": employment_status or None,
+                                "account_status": account_status or None,
+                                "department": department.strip() or None,
+                                "job": job.strip() or None,
+                                "employment_type": None,
+                                "vendor": vendor.strip() or None,
+                                "hire_date": None,
+                                "termination_date": None,
+                                "raw_data": raw,
+                                "updated_at": now_iso(),
+                            }
+                        ]
+                    )
+                    if inserted:
+                        st.success("员工已新增。")
+                        st.rerun()
+
+    st.divider()
+    with st.expander("🗑️ Delete Employee / 删除员工", expanded=False):
+        st.caption("删除员工会同时永久删除该员工的全部 Feedback / Warning / Recognition 历史。请先导出 Backup 再操作。")
+        employees_for_delete = db.list_employees()
+        if not employees_for_delete:
+            st.caption("No employee data yet.")
+        else:
+            sorted_employees = sorted(
+                employees_for_delete,
+                key=lambda x: (str(x.get("name") or ""), str(x.get("employee_id") or "")),
+            )
+            labels = [
+                f"{e.get('name') or e.get('employee_id')} · {e.get('employee_id')} · {e.get('attendance_group') or '未分组'}"
+                for e in sorted_employees
+            ]
+            selected_label = st.selectbox("Employee to delete", labels, key="delete_employee_selector")
+            selected_index = labels.index(selected_label)
+            selected_employee = sorted_employees[selected_index]
+            delete_employee_id = str(selected_employee.get("employee_id"))
+            fb_n = len(db.list_feedback(delete_employee_id))
+            rec_n = len(db.list_recognition(delete_employee_id))
+            st.warning(f"将删除 {selected_employee.get('name') or delete_employee_id}，以及 {fb_n} 条 Feedback/Warning 和 {rec_n} 条 Recognition。")
+            confirmation = st.text_input(
+                f"输入用户编码 {delete_employee_id} 确认删除",
+                key="delete_employee_confirmation",
+            )
+            if st.button(
+                "Delete Employee and All History",
+                type="primary",
+                disabled=(confirmation.strip() != delete_employee_id),
+                use_container_width=True,
+            ):
+                db.delete_employee(delete_employee_id)
+                st.session_state.pop("selected_employee_id", None)
+                st.success("员工及其全部历史记录已删除。")
                 st.rerun()
 
     st.divider()
