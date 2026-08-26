@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -22,6 +23,7 @@ except Exception:
 
 APP_TITLE = "Employee Feedback & Recognition"
 LOCAL_DB_PATH = Path(__file__).with_name("employee_feedback.db")
+APP_TIMEZONE = ZoneInfo("America/Los_Angeles")
 
 EMPLOYEE_COLUMNS = [
     "employee_id",
@@ -52,7 +54,8 @@ FEEDBACK_TYPES = [
 # Helpers
 # -----------------------------
 def now_iso() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    # Store new record timestamps with an explicit Pacific Time offset.
+    return datetime.now(APP_TIMEZONE).isoformat(timespec="seconds")
 
 
 def clean_value(value: Any) -> Optional[str]:
@@ -133,6 +136,28 @@ def format_date(value: Any) -> str:
         return parsed.strftime("%b %d, %Y")
     except Exception:
         return str(value)
+
+
+def format_saved_time(value: Any) -> str:
+    """Format created_at in Pacific Time for display."""
+    text = clean_value(value)
+    if not text:
+        return "—"
+    try:
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.isna(parsed):
+            return str(text)
+        # Supabase timestamptz values are timezone-aware. SQLite historical
+        # values may be naive; treat those as Pacific because older local-mode
+        # records were created from the user's local app session.
+        py_dt = parsed.to_pydatetime()
+        if py_dt.tzinfo is None:
+            py_dt = py_dt.replace(tzinfo=APP_TIMEZONE)
+        else:
+            py_dt = py_dt.astimezone(APP_TIMEZONE)
+        return py_dt.strftime("%b %d, %Y · %I:%M %p PT").replace(" 0", " ")
+    except Exception:
+        return str(text)
 
 
 def escape_html(text: Any) -> str:
@@ -652,6 +677,7 @@ def employee_summary(db: Database) -> pd.DataFrame:
 
 def open_profile(employee_id: str) -> None:
     st.session_state["selected_employee_id"] = employee_id
+    st.session_state["show_all_feedback"] = False
     st.session_state["page"] = "Employees"
 
 
@@ -716,7 +742,9 @@ def render_record_card(db: Database, record: Dict[str, Any], kind: str) -> None:
                 st.session_state[delete_state_key] = True
                 st.rerun()
 
-        meta = format_date(record.get("record_date"))
+        record_date_text = format_date(record.get("record_date"))
+        saved_time_text = format_saved_time(record.get("created_at"))
+        meta = f"Record Date: {record_date_text} · Saved: {saved_time_text}"
         by = clean_value(record.get("created_by"))
         if by:
             meta += f" · Recorded by {escape_html(by)}"
@@ -740,6 +768,84 @@ def render_record_card(db: Database, record: Dict[str, Any], kind: str) -> None:
                 if st.button("Cancel", key=f"cancel_delete_{kind}_{record_id}", use_container_width=True):
                     st.session_state[delete_state_key] = False
                     st.rerun()
+
+
+def render_all_feedback_view(db: Database, employee_ids: List[str]) -> None:
+    """Show all Feedback/Warning records for the employees in the current home filter."""
+    allowed = {str(x) for x in employee_ids if clean_value(x)}
+    employees = {str(e.get("employee_id")): e for e in db.list_employees()}
+    all_feedback = db.list_feedback()
+    feedback = [r for r in all_feedback if str(r.get("employee_id") or "") in allowed]
+
+    st.divider()
+    title_col, close_col = st.columns([10, 1.4], gap="small", vertical_alignment="center")
+    with title_col:
+        st.subheader(f"All Feedback / Warning Records · {len(feedback)}")
+        st.caption("当前显示范围与上方员工状态/搜索条件一致，最新记录优先。")
+    with close_col:
+        if st.button("Close", key="close_all_feedback", use_container_width=True):
+            st.session_state["show_all_feedback"] = False
+            st.rerun()
+
+    if not feedback:
+        st.info("当前筛选范围内没有 Feedback / Warning 记录。")
+        return
+
+    for idx, record in enumerate(feedback):
+        employee_id = str(record.get("employee_id") or "")
+        employee = employees.get(employee_id, {})
+        name = clean_value(employee.get("name")) or employee_id
+        group = clean_value(employee.get("attendance_group")) or "未分组"
+        feedback_type = clean_value(record.get("feedback_type")) or "Feedback / Warning"
+        record_id = str(record.get("id") or f"row-{idx}")
+        delete_state_key = f"confirm_delete_all_feedback_{record_id}"
+        if delete_state_key not in st.session_state:
+            st.session_state[delete_state_key] = False
+
+        with st.container(border=True):
+            left, employee_col, delete_col = st.columns([4.8, 4.5, 0.8], gap="small", vertical_alignment="center")
+            with left:
+                st.markdown(f"**{escape_html(feedback_type)}**")
+            with employee_col:
+                if st.button(
+                    f"{name} · {employee_id}",
+                    key=f"all_feedback_employee_{record_id}",
+                    type="tertiary",
+                    use_container_width=True,
+                    help="点击进入员工个人页面",
+                ):
+                    st.session_state["selected_employee_id"] = employee_id
+                    st.session_state["show_all_feedback"] = False
+                    st.rerun()
+            with delete_col:
+                if st.button("🗑️", key=f"delete_all_feedback_{record_id}", help="Delete this record", use_container_width=True):
+                    st.session_state[delete_state_key] = True
+                    st.rerun()
+
+            date_text = format_date(record.get("record_date"))
+            time_text = format_saved_time(record.get("created_at"))
+            by = clean_value(record.get("created_by")) or "—"
+            st.markdown(
+                f"<div class='record-meta'>{escape_html(group)} · Record Date: {escape_html(date_text)} · "
+                f"Saved: {escape_html(time_text)} · Recorded by {escape_html(by)}</div>",
+                unsafe_allow_html=True,
+            )
+            st.write(record.get("content") or "")
+            if clean_value(record.get("note")):
+                st.caption(f"Note: {record.get('note')}")
+
+            if st.session_state[delete_state_key]:
+                st.warning("确认删除这条 Feedback / Warning？删除后无法恢复。")
+                yes_col, no_col, _ = st.columns([1.2, 1, 6])
+                with yes_col:
+                    if st.button("Confirm Delete", key=f"confirm_delete_all_{record_id}", type="primary", use_container_width=True):
+                        db.delete_feedback(record_id)
+                        st.session_state.pop(delete_state_key, None)
+                        st.rerun()
+                with no_col:
+                    if st.button("Cancel", key=f"cancel_delete_all_{record_id}", use_container_width=True):
+                        st.session_state[delete_state_key] = False
+                        st.rerun()
 
 
 # -----------------------------
@@ -778,11 +884,30 @@ def render_home(db: Database) -> None:
 
     total_col, fb_col, rec_col = st.columns(3)
     total_col.metric("Employees", len(filtered))
-    fb_col.metric("Feedback / Warning", int(filtered["feedback_count"].sum()) if not filtered.empty else 0)
+    feedback_total = int(filtered["feedback_count"].sum()) if not filtered.empty else 0
+    with fb_col:
+        # st.metric itself is not interactive, so the count is rendered as a
+        # dedicated button inside a metric-style bordered card.
+        with st.container(border=True):
+            st.caption("Feedback / Warning")
+            if st.button(
+                str(feedback_total),
+                key="open_all_feedback_count",
+                type="tertiary",
+                use_container_width=True,
+                help="点击数量查看全部 Feedback / Warning 记录",
+            ):
+                st.session_state["show_all_feedback"] = True
+                st.rerun()
+            st.caption("点击数量查看全部记录")
     rec_col.metric("Recognition", int(filtered["recognition_count"].sum()) if not filtered.empty else 0)
 
     if filtered.empty:
         st.warning("没有找到符合条件的员工。")
+        return
+
+    if st.session_state.get("show_all_feedback", False):
+        render_all_feedback_view(db, filtered["employee_id"].astype(str).tolist())
         return
 
     filtered = filtered.sort_values(
