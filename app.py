@@ -630,6 +630,23 @@ def inject_css() -> None:
             .employee-number {padding: .30rem .15rem; text-align: right; font-variant-numeric: tabular-nums;}
             .employee-row-divider {height: 1px; background: rgba(128,128,128,.28); margin: .18rem 0 .28rem 0;}
             .employee-row-divider.subtle {background: rgba(128,128,128,.16); margin: .12rem 0 .16rem 0;}
+            .compact-record-header {color: #9ca3af; font-size: .78rem; font-weight: 600; margin: .15rem 0 .25rem 0;}
+            .compact-record-main {font-size: .94rem; line-height: 1.22; margin: .05rem 0;}
+            .compact-record-meta {color: #6b7280; font-size: .76rem; line-height: 1.22; margin-top: .08rem;}
+            .compact-record-divider {height: 1px; background: rgba(128,128,128,.20); margin: .34rem 0 .38rem 0;}
+            .compact-record-note {color: #8b93a1; font-size: .76rem; line-height: 1.2; margin-top: .08rem;}
+            [class*="st-key-all_feedback_employee_"] button,
+            [class*="st-key-all_recognition_employee_"] button {
+                min-height: 1.9rem !important;
+                padding: .05rem .15rem !important;
+                justify-content: flex-start !important;
+                text-align: left !important;
+            }
+            [class*="st-key-delete_all_feedback_"] button,
+            [class*="st-key-delete_all_recognition_"] button {
+                min-height: 2rem !important;
+                padding: .05rem .25rem !important;
+            }
 
             /* Home summary cards: keep the clickable count as large as st.metric. */
             .st-key-feedback_metric_card button,
@@ -949,6 +966,13 @@ def render_all_feedback_view(db: Database, employee_ids: List[str]) -> None:
         st.info("没有符合当前筛选条件的 Feedback / Warning 记录。")
         return
 
+    # Compact list layout: one record per row instead of a tall card.
+    hdr = st.columns([1.65, 2.45, 2.55, 4.5, 0.55], gap="small", vertical_alignment="center")
+    for col, label in zip(hdr, ["Type", "Employee", "Date / Recorded By", "Content", ""]):
+        with col:
+            st.markdown(f"<div class='compact-record-header'>{label}</div>", unsafe_allow_html=True)
+    st.markdown("<div class='compact-record-divider'></div>", unsafe_allow_html=True)
+
     for idx, record in enumerate(feedback):
         employee_id = str(record.get("employee_id") or "")
         employee = employees.get(employee_id, {})
@@ -960,51 +984,59 @@ def render_all_feedback_view(db: Database, employee_ids: List[str]) -> None:
         if delete_state_key not in st.session_state:
             st.session_state[delete_state_key] = False
 
-        with st.container(border=True):
-            left, employee_col, delete_col = st.columns([4.8, 4.5, 0.8], gap="small", vertical_alignment="center")
-            with left:
-                st.markdown(f"**{escape_html(feedback_type)}**")
-            with employee_col:
-                if st.button(
-                    f"{name} · {employee_id}",
-                    key=f"all_feedback_employee_{record_id}",
-                    type="tertiary",
-                    use_container_width=True,
-                    help="点击进入员工个人页面",
-                ):
-                    st.session_state["selected_employee_id"] = employee_id
-                    st.session_state["show_all_feedback"] = False
-                    st.session_state["show_all_recognition"] = False
-                    st.rerun()
-            with delete_col:
-                if st.button("🗑️", key=f"delete_all_feedback_{record_id}", help="Delete this record", use_container_width=True):
-                    st.session_state[delete_state_key] = True
-                    st.rerun()
-
+        type_col, employee_col, meta_col, content_col, delete_col = st.columns(
+            [1.65, 2.45, 2.55, 4.5, 0.55], gap="small", vertical_alignment="top"
+        )
+        with type_col:
+            st.markdown(f"<div class='compact-record-main'><strong>{escape_html(feedback_type)}</strong></div>", unsafe_allow_html=True)
+        with employee_col:
+            if st.button(
+                f"{name} · {employee_id}",
+                key=f"all_feedback_employee_{record_id}",
+                type="tertiary",
+                help="点击进入员工个人页面",
+            ):
+                st.session_state["selected_employee_id"] = employee_id
+                st.session_state["show_all_feedback"] = False
+                st.session_state["show_all_recognition"] = False
+                st.rerun()
+            st.markdown(f"<div class='compact-record-meta'>{escape_html(group)}</div>", unsafe_allow_html=True)
+        with meta_col:
             date_text = format_date(record.get("record_date"))
             time_text = format_saved_time(record.get("created_at"))
             by = clean_value(record.get("created_by")) or "—"
             st.markdown(
-                f"<div class='record-meta'>{escape_html(group)} · Record Date: {escape_html(date_text)} · "
-                f"Saved: {escape_html(time_text)} · Recorded by {escape_html(by)}</div>",
+                f"<div class='compact-record-main'>{escape_html(date_text)}</div>"
+                f"<div class='compact-record-meta'>Saved {escape_html(time_text)}<br>By {escape_html(by)}</div>",
                 unsafe_allow_html=True,
             )
-            st.write(record.get("content") or "")
+        with content_col:
+            content = clean_value(record.get("content")) or "—"
+            st.markdown(f"<div class='compact-record-main'>{escape_html(content)}</div>", unsafe_allow_html=True)
             if clean_value(record.get("note")):
-                st.caption(f"Note: {record.get('note')}")
+                st.markdown(
+                    f"<div class='compact-record-note'>Note: {escape_html(record.get('note'))}</div>",
+                    unsafe_allow_html=True,
+                )
+        with delete_col:
+            if st.button("🗑️", key=f"delete_all_feedback_{record_id}", help="Delete this record"):
+                st.session_state[delete_state_key] = True
+                st.rerun()
 
-            if st.session_state[delete_state_key]:
-                st.warning("确认删除这条 Feedback / Warning？删除后无法恢复。")
-                yes_col, no_col, _ = st.columns([1.2, 1, 6])
-                with yes_col:
-                    if st.button("Confirm Delete", key=f"confirm_delete_all_{record_id}", type="primary", use_container_width=True):
-                        db.delete_feedback(record_id)
-                        st.session_state.pop(delete_state_key, None)
-                        st.rerun()
-                with no_col:
-                    if st.button("Cancel", key=f"cancel_delete_all_{record_id}", use_container_width=True):
-                        st.session_state[delete_state_key] = False
-                        st.rerun()
+        if st.session_state[delete_state_key]:
+            st.warning("确认删除这条 Feedback / Warning？删除后无法恢复。")
+            yes_col, no_col, _ = st.columns([1.2, 1, 6])
+            with yes_col:
+                if st.button("Confirm Delete", key=f"confirm_delete_all_{record_id}", type="primary", use_container_width=True):
+                    db.delete_feedback(record_id)
+                    st.session_state.pop(delete_state_key, None)
+                    st.rerun()
+            with no_col:
+                if st.button("Cancel", key=f"cancel_delete_all_{record_id}", use_container_width=True):
+                    st.session_state[delete_state_key] = False
+                    st.rerun()
+
+        st.markdown("<div class='compact-record-divider'></div>", unsafe_allow_html=True)
 
 
 def render_all_recognition_view(db: Database, employee_ids: List[str]) -> None:
@@ -1145,6 +1177,13 @@ def render_all_recognition_view(db: Database, employee_ids: List[str]) -> None:
         st.info("没有符合当前筛选条件的 Recognition 记录。")
         return
 
+    # Compact list layout, matching the Feedback/Warning view.
+    hdr = st.columns([2.5, 2.65, 5.55, 0.55], gap="small", vertical_alignment="center")
+    for col, label in zip(hdr, ["Employee", "Date / Recorded By", "Recognition", ""]):
+        with col:
+            st.markdown(f"<div class='compact-record-header'>{label}</div>", unsafe_allow_html=True)
+    st.markdown("<div class='compact-record-divider'></div>", unsafe_allow_html=True)
+
     for idx, record in enumerate(recognition):
         employee_id = str(record.get("employee_id") or "")
         employee = employees.get(employee_id, {})
@@ -1155,50 +1194,56 @@ def render_all_recognition_view(db: Database, employee_ids: List[str]) -> None:
         if delete_state_key not in st.session_state:
             st.session_state[delete_state_key] = False
 
-        with st.container(border=True):
-            left, employee_col, delete_col = st.columns([4.8, 4.5, 0.8], gap="small", vertical_alignment="center")
-            with left:
-                st.markdown("**Recognition**")
-            with employee_col:
-                if st.button(
-                    f"{name} · {employee_id}",
-                    key=f"all_recognition_employee_{record_id}",
-                    type="tertiary",
-                    use_container_width=True,
-                    help="点击进入员工个人页面",
-                ):
-                    st.session_state["selected_employee_id"] = employee_id
-                    st.session_state["show_all_recognition"] = False
-                    st.rerun()
-            with delete_col:
-                if st.button("🗑️", key=f"delete_all_recognition_{record_id}", help="Delete this record", use_container_width=True):
-                    st.session_state[delete_state_key] = True
-                    st.rerun()
-
+        employee_col, meta_col, content_col, delete_col = st.columns(
+            [2.5, 2.65, 5.55, 0.55], gap="small", vertical_alignment="top"
+        )
+        with employee_col:
+            if st.button(
+                f"{name} · {employee_id}",
+                key=f"all_recognition_employee_{record_id}",
+                type="tertiary",
+                help="点击进入员工个人页面",
+            ):
+                st.session_state["selected_employee_id"] = employee_id
+                st.session_state["show_all_recognition"] = False
+                st.rerun()
+            st.markdown(f"<div class='compact-record-meta'>{escape_html(group)}</div>", unsafe_allow_html=True)
+        with meta_col:
             date_text = format_date(record.get("record_date"))
             time_text = format_saved_time(record.get("created_at"))
             by = clean_value(record.get("created_by")) or "—"
             st.markdown(
-                f"<div class='record-meta'>{escape_html(group)} · Record Date: {escape_html(date_text)} · "
-                f"Saved: {escape_html(time_text)} · Recorded by {escape_html(by)}</div>",
+                f"<div class='compact-record-main'>{escape_html(date_text)}</div>"
+                f"<div class='compact-record-meta'>Saved {escape_html(time_text)}<br>By {escape_html(by)}</div>",
                 unsafe_allow_html=True,
             )
-            st.write(record.get("content") or "")
+        with content_col:
+            content = clean_value(record.get("content")) or "—"
+            st.markdown(f"<div class='compact-record-main'>{escape_html(content)}</div>", unsafe_allow_html=True)
             if clean_value(record.get("note")):
-                st.caption(f"Note: {record.get('note')}")
+                st.markdown(
+                    f"<div class='compact-record-note'>Note: {escape_html(record.get('note'))}</div>",
+                    unsafe_allow_html=True,
+                )
+        with delete_col:
+            if st.button("🗑️", key=f"delete_all_recognition_{record_id}", help="Delete this record"):
+                st.session_state[delete_state_key] = True
+                st.rerun()
 
-            if st.session_state[delete_state_key]:
-                st.warning("确认删除这条 Recognition？删除后无法恢复。")
-                yes_col, no_col, _ = st.columns([1.2, 1, 6])
-                with yes_col:
-                    if st.button("Confirm Delete", key=f"confirm_delete_all_recognition_{record_id}", type="primary", use_container_width=True):
-                        db.delete_recognition(record_id)
-                        st.session_state.pop(delete_state_key, None)
-                        st.rerun()
-                with no_col:
-                    if st.button("Cancel", key=f"cancel_delete_all_recognition_{record_id}", use_container_width=True):
-                        st.session_state[delete_state_key] = False
-                        st.rerun()
+        if st.session_state[delete_state_key]:
+            st.warning("确认删除这条 Recognition？删除后无法恢复。")
+            yes_col, no_col, _ = st.columns([1.2, 1, 6])
+            with yes_col:
+                if st.button("Confirm Delete", key=f"confirm_delete_all_recognition_{record_id}", type="primary", use_container_width=True):
+                    db.delete_recognition(record_id)
+                    st.session_state.pop(delete_state_key, None)
+                    st.rerun()
+            with no_col:
+                if st.button("Cancel", key=f"cancel_delete_all_recognition_{record_id}", use_container_width=True):
+                    st.session_state[delete_state_key] = False
+                    st.rerun()
+
+        st.markdown("<div class='compact-record-divider'></div>", unsafe_allow_html=True)
 
 
 # -----------------------------
