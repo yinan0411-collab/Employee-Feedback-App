@@ -798,24 +798,155 @@ def render_record_card(db: Database, record: Dict[str, Any], kind: str) -> None:
 
 
 def render_all_feedback_view(db: Database, employee_ids: List[str]) -> None:
-    """Show all Feedback/Warning records for the employees in the current home filter."""
+    """Show and filter all Feedback/Warning records in the current home scope."""
     allowed = {str(x) for x in employee_ids if clean_value(x)}
     employees = {str(e.get("employee_id")): e for e in db.list_employees()}
     all_feedback = db.list_feedback()
-    feedback = [r for r in all_feedback if str(r.get("employee_id") or "") in allowed]
+    base_feedback = [r for r in all_feedback if str(r.get("employee_id") or "") in allowed]
 
     st.divider()
     title_col, close_col = st.columns([10, 1.4], gap="small", vertical_alignment="center")
-    with title_col:
-        st.subheader(f"All Feedback / Warning Records · {len(feedback)}")
-        st.caption("当前显示范围与上方员工状态/搜索条件一致，最新记录优先。")
     with close_col:
         if st.button("Close", key="close_all_feedback", use_container_width=True):
             st.session_state["show_all_feedback"] = False
             st.rerun()
 
+    if not base_feedback:
+        with title_col:
+            st.subheader("All Feedback / Warning Records · 0")
+        st.info("当前员工范围内没有 Feedback / Warning 记录。")
+        return
+
+    # ---------- Filter controls ----------
+    group_options = sorted({
+        clean_value(employees.get(str(r.get("employee_id") or ""), {}).get("attendance_group")) or "未分组"
+        for r in base_feedback
+    })
+    type_options = sorted({clean_value(r.get("feedback_type")) or "Feedback / Warning" for r in base_feedback})
+    recorder_options = sorted({clean_value(r.get("created_by")) for r in base_feedback if clean_value(r.get("created_by"))})
+
+    parsed_dates = []
+    for r in base_feedback:
+        try:
+            parsed = pd.to_datetime(r.get("record_date"), errors="coerce")
+            if not pd.isna(parsed):
+                parsed_dates.append(parsed.date())
+        except Exception:
+            pass
+    min_record_date = min(parsed_dates) if parsed_dates else date.today()
+    max_record_date = max(parsed_dates) if parsed_dates else date.today()
+
+    f1, f2, f3 = st.columns([2.2, 1.35, 1.65], gap="small")
+    with f1:
+        record_search = st.text_input(
+            "Search records",
+            placeholder="员工姓名 / User ID / 内容关键词",
+            key="all_feedback_record_search",
+        ).strip()
+    with f2:
+        selected_types = st.multiselect(
+            "Feedback Type",
+            type_options,
+            default=[],
+            key="all_feedback_type_filter",
+            placeholder="All types",
+        )
+    with f3:
+        selected_groups = st.multiselect(
+            "Attendance Group",
+            group_options,
+            default=[],
+            key="all_feedback_group_filter",
+            placeholder="All groups",
+        )
+
+    f4, f5, f6, f7 = st.columns([1.2, 1.2, 1.55, 0.8], gap="small", vertical_alignment="bottom")
+    with f4:
+        date_from = st.date_input(
+            "Record Date From",
+            value=min_record_date,
+            min_value=min_record_date,
+            max_value=max_record_date,
+            key="all_feedback_date_from",
+        )
+    with f5:
+        date_to = st.date_input(
+            "Record Date To",
+            value=max_record_date,
+            min_value=min_record_date,
+            max_value=max_record_date,
+            key="all_feedback_date_to",
+        )
+    with f6:
+        selected_recorders = st.multiselect(
+            "Recorded By",
+            recorder_options,
+            default=[],
+            key="all_feedback_recorder_filter",
+            placeholder="All recorders",
+        )
+    with f7:
+        reset_filters = st.button("Reset", key="reset_all_feedback_filters", use_container_width=True)
+
+    if reset_filters:
+        for key in [
+            "all_feedback_record_search",
+            "all_feedback_type_filter",
+            "all_feedback_group_filter",
+            "all_feedback_recorder_filter",
+            "all_feedback_date_from",
+            "all_feedback_date_to",
+        ]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    if date_from > date_to:
+        st.warning("Record Date From 不能晚于 Record Date To。")
+
+    feedback = []
+    q = record_search.lower()
+    for record in base_feedback:
+        employee_id = str(record.get("employee_id") or "")
+        employee = employees.get(employee_id, {})
+        name = clean_value(employee.get("name")) or ""
+        group = clean_value(employee.get("attendance_group")) or "未分组"
+        feedback_type = clean_value(record.get("feedback_type")) or "Feedback / Warning"
+        recorder = clean_value(record.get("created_by")) or ""
+        content = clean_value(record.get("content")) or ""
+        note = clean_value(record.get("note")) or ""
+
+        if selected_types and feedback_type not in selected_types:
+            continue
+        if selected_groups and group not in selected_groups:
+            continue
+        if selected_recorders and recorder not in selected_recorders:
+            continue
+
+        try:
+            record_dt = pd.to_datetime(record.get("record_date"), errors="coerce")
+            if not pd.isna(record_dt):
+                record_day = record_dt.date()
+                if record_day < date_from or record_day > date_to:
+                    continue
+        except Exception:
+            pass
+
+        if q:
+            haystack = " ".join([name, employee_id, group, feedback_type, recorder, content, note]).lower()
+            if q not in haystack:
+                continue
+
+        feedback.append(record)
+
+    with title_col:
+        st.subheader(f"All Feedback / Warning Records · {len(feedback)}")
+        if len(feedback) != len(base_feedback):
+            st.caption(f"Filtered from {len(base_feedback)} records · 最新记录优先")
+        else:
+            st.caption("当前显示范围与上方员工状态/搜索条件一致，最新记录优先。")
+
     if not feedback:
-        st.info("当前筛选范围内没有 Feedback / Warning 记录。")
+        st.info("没有符合当前筛选条件的 Feedback / Warning 记录。")
         return
 
     for idx, record in enumerate(feedback):
@@ -877,24 +1008,141 @@ def render_all_feedback_view(db: Database, employee_ids: List[str]) -> None:
 
 
 def render_all_recognition_view(db: Database, employee_ids: List[str]) -> None:
-    """Show all Recognition records for employees in the current home filter."""
+    """Show and filter all Recognition records in the current home scope."""
     allowed = {str(x) for x in employee_ids if clean_value(x)}
     employees = {str(e.get("employee_id")): e for e in db.list_employees()}
     all_recognition = db.list_recognition()
-    recognition = [r for r in all_recognition if str(r.get("employee_id") or "") in allowed]
+    base_recognition = [r for r in all_recognition if str(r.get("employee_id") or "") in allowed]
 
     st.divider()
     title_col, close_col = st.columns([10, 1.4], gap="small", vertical_alignment="center")
-    with title_col:
-        st.subheader(f"All Recognition Records · {len(recognition)}")
-        st.caption("当前显示范围与上方员工状态/搜索条件一致，最新记录优先。")
     with close_col:
         if st.button("Close", key="close_all_recognition", use_container_width=True):
             st.session_state["show_all_recognition"] = False
             st.rerun()
 
+    if not base_recognition:
+        with title_col:
+            st.subheader("All Recognition Records · 0")
+        st.info("当前员工范围内没有 Recognition 记录。")
+        return
+
+    group_options = sorted({
+        clean_value(employees.get(str(r.get("employee_id") or ""), {}).get("attendance_group")) or "未分组"
+        for r in base_recognition
+    })
+    recorder_options = sorted({clean_value(r.get("created_by")) for r in base_recognition if clean_value(r.get("created_by"))})
+
+    parsed_dates = []
+    for r in base_recognition:
+        try:
+            parsed = pd.to_datetime(r.get("record_date"), errors="coerce")
+            if not pd.isna(parsed):
+                parsed_dates.append(parsed.date())
+        except Exception:
+            pass
+    min_record_date = min(parsed_dates) if parsed_dates else date.today()
+    max_record_date = max(parsed_dates) if parsed_dates else date.today()
+
+    f1, f2, f3 = st.columns([2.2, 1.6, 1.6], gap="small")
+    with f1:
+        record_search = st.text_input(
+            "Search records",
+            placeholder="员工姓名 / User ID / 内容关键词",
+            key="all_recognition_record_search",
+        ).strip()
+    with f2:
+        selected_groups = st.multiselect(
+            "Attendance Group",
+            group_options,
+            default=[],
+            key="all_recognition_group_filter",
+            placeholder="All groups",
+        )
+    with f3:
+        selected_recorders = st.multiselect(
+            "Recorded By",
+            recorder_options,
+            default=[],
+            key="all_recognition_recorder_filter",
+            placeholder="All recorders",
+        )
+
+    f4, f5, f6 = st.columns([1.2, 1.2, 0.8], gap="small", vertical_alignment="bottom")
+    with f4:
+        date_from = st.date_input(
+            "Record Date From",
+            value=min_record_date,
+            min_value=min_record_date,
+            max_value=max_record_date,
+            key="all_recognition_date_from",
+        )
+    with f5:
+        date_to = st.date_input(
+            "Record Date To",
+            value=max_record_date,
+            min_value=min_record_date,
+            max_value=max_record_date,
+            key="all_recognition_date_to",
+        )
+    with f6:
+        reset_filters = st.button("Reset", key="reset_all_recognition_filters", use_container_width=True)
+
+    if reset_filters:
+        for key in [
+            "all_recognition_record_search",
+            "all_recognition_group_filter",
+            "all_recognition_recorder_filter",
+            "all_recognition_date_from",
+            "all_recognition_date_to",
+        ]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    if date_from > date_to:
+        st.warning("Record Date From 不能晚于 Record Date To。")
+
+    recognition = []
+    q = record_search.lower()
+    for record in base_recognition:
+        employee_id = str(record.get("employee_id") or "")
+        employee = employees.get(employee_id, {})
+        name = clean_value(employee.get("name")) or ""
+        group = clean_value(employee.get("attendance_group")) or "未分组"
+        recorder = clean_value(record.get("created_by")) or ""
+        content = clean_value(record.get("content")) or ""
+        note = clean_value(record.get("note")) or ""
+
+        if selected_groups and group not in selected_groups:
+            continue
+        if selected_recorders and recorder not in selected_recorders:
+            continue
+
+        try:
+            record_dt = pd.to_datetime(record.get("record_date"), errors="coerce")
+            if not pd.isna(record_dt):
+                record_day = record_dt.date()
+                if record_day < date_from or record_day > date_to:
+                    continue
+        except Exception:
+            pass
+
+        if q:
+            haystack = " ".join([name, employee_id, group, recorder, content, note]).lower()
+            if q not in haystack:
+                continue
+
+        recognition.append(record)
+
+    with title_col:
+        st.subheader(f"All Recognition Records · {len(recognition)}")
+        if len(recognition) != len(base_recognition):
+            st.caption(f"Filtered from {len(base_recognition)} records · 最新记录优先")
+        else:
+            st.caption("当前显示范围与上方员工状态/搜索条件一致，最新记录优先。")
+
     if not recognition:
-        st.info("当前筛选范围内没有 Recognition 记录。")
+        st.info("没有符合当前筛选条件的 Recognition 记录。")
         return
 
     for idx, record in enumerate(recognition):
